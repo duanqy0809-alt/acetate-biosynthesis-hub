@@ -219,6 +219,20 @@ type OpenAlexWork = {
   primary_location?: { source?: { display_name?: string }; landing_page_url?: string | null };
 };
 
+type EuropePmcResult = {
+  id?: string;
+  source?: string;
+  pmid?: string;
+  pmcid?: string;
+  doi?: string;
+  title?: string;
+  authorString?: string;
+  pubYear?: string;
+  journalTitle?: string;
+  abstractText?: string;
+  language?: string;
+};
+
 function rebuildOpenAlexAbstract(index?: Record<string, number[]> | null) {
   if (!index) return "";
   const words: Array<[number, string]> = [];
@@ -258,8 +272,38 @@ function classifyLivePaper(text: string) {
   return { chassis, product, route, mode };
 }
 
+function normalizeResearchQuery(query: string) {
+  const raw = query.trim();
+  if (!raw) return "acetate carbon source microbial production biosynthesis";
+
+  const translations: Array<[RegExp, string]> = [
+    [/适应性进化|实验室进化|定向进化/g, " adaptive laboratory evolution "],
+    [/共利用|共底物|共发酵/g, " co-utilization cofeeding co-fermentation "],
+    [/乙酸|醋酸|乙酸盐/g, " acetate "],
+    [/谷氨酸棒状杆菌|谷氨酸棒杆菌|谷棒/g, " Corynebacterium glutamicum "],
+    [/大肠杆菌/g, " Escherichia coli "],
+    [/解脂耶氏酵母/g, " Yarrowia lipolytica "],
+    [/恶臭假单胞菌/g, " Pseudomonas putida "],
+    [/聚羟基脂肪酸酯|聚羟基烷酸酯|聚羟基脂肪酸酯/g, " polyhydroxyalkanoate PHA "],
+    [/微生物油脂|油脂|脂质/g, " microbial lipid "],
+    [/衣康酸/g, " itaconic acid "],
+    [/谷氨酸/g, " glutamate "],
+    [/琥珀酸/g, " succinate "],
+    [/代谢工程/g, " metabolic engineering "],
+    [/耐受性|耐受/g, " tolerance "],
+    [/生物合成|生物制造/g, " biosynthesis bioproduction "],
+    [/底盘|宿主/g, " microbial chassis host "],
+  ];
+
+  let normalized = raw;
+  for (const [pattern, replacement] of translations) normalized = normalized.replace(pattern, replacement);
+  normalized = normalized.replace(/[\u4e00-\u9fff]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) normalized = "microbial production biosynthesis";
+  return /\bacetate\b|acetic acid/i.test(normalized) ? normalized : `acetate ${normalized}`;
+}
+
 async function searchOpenAlexInBrowser(query: string): Promise<Paper[]> {
-  const requested = query.trim() || "acetate carbon source microbial production biosynthesis";
+  const requested = normalizeResearchQuery(query);
   const params = new URLSearchParams({ search: requested, "per-page": "30", filter: "from_publication_date:1990-01-01" });
   const response = await fetch(`https://api.openalex.org/works?${params}`);
   if (!response.ok) throw new Error(`OpenAlex ${response.status}`);
@@ -294,6 +338,83 @@ async function searchOpenAlexInBrowser(query: string): Promise<Paper[]> {
       live: true,
     } satisfies Paper];
   });
+}
+
+async function searchEuropePmcInBrowser(query: string): Promise<Paper[]> {
+  const requested = normalizeResearchQuery(query);
+  const params = new URLSearchParams({
+    query: `TITLE_ABS:("${requested.replace(/"/g, "")}")`,
+    format: "json",
+    pageSize: "30",
+    resultType: "core",
+  });
+  const response = await fetch(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?${params}`);
+  if (!response.ok) throw new Error(`Europe PMC ${response.status}`);
+  const payload = await response.json() as { resultList?: { result?: EuropePmcResult[] } };
+
+  return (payload.resultList?.result ?? []).flatMap((work) => {
+    const title = String(work.title ?? "").replace(/<[^>]+>/g, "").trim();
+    const abstract = String(work.abstractText ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const searchable = `${title} ${abstract}`;
+    if (!title || !/acetate|acetic acid|sodium acetate|乙酸|醋酸/i.test(searchable)) return [];
+    const { chassis, product, route, mode } = classifyLivePaper(searchable);
+    const doi = work.doi?.trim();
+    const language: "EN" | "ZH" = work.language?.toLowerCase().startsWith("zh") || /[\u4e00-\u9fff]/.test(title) ? "ZH" : "EN";
+    const articleSource = work.source || (work.pmcid ? "PMC" : "MED");
+    const articleId = work.id || work.pmid || work.pmcid;
+    return [{
+      id: doi ? `doi-${doi}` : `epmc-${articleSource}-${articleId ?? title}`,
+      doi,
+      title,
+      titleZh: language === "ZH" ? title : "点击生成中文译题",
+      authors: work.authorString || "作者信息待补充",
+      year: Number(work.pubYear) || 0,
+      journal: work.journalTitle || "Europe PMC indexed source",
+      chassis,
+      product,
+      route,
+      mode,
+      language,
+      source: "Europe PMC",
+      href: doi
+        ? `https://doi.org/${doi}`
+        : articleId
+          ? `https://europepmc.org/article/${articleSource}/${articleId}`
+          : "https://europepmc.org/",
+      summaryZh: language === "ZH" ? (abstract.slice(0, 210) || "中文记录，摘要待补充。") : "英文摘要可在双语详情中同步翻译。",
+      abstract,
+      tags: [product, chassis === "待人工标注底盘" ? "待标注" : chassis, mode],
+      live: true,
+    } satisfies Paper];
+  });
+}
+
+function deduplicateLivePapers(items: Paper[]) {
+  const seen = new Set<string>();
+  return items.filter((paper) => {
+    const key = paper.doi?.toLowerCase() || paper.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, "");
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function searchLiteratureInBrowser(query: string) {
+  const requestedQuery = normalizeResearchQuery(query);
+  const sourceNames = ["OpenAlex", "Europe PMC"] as const;
+  const settled = await Promise.allSettled([
+    searchOpenAlexInBrowser(requestedQuery),
+    searchEuropePmcInBrowser(requestedQuery),
+  ]);
+  const sourceStatus = settled.map((result, index) => ({
+    name: sourceNames[index],
+    status: result.status === "fulfilled" ? "ok" : "error",
+  }));
+  const papers = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  if (settled.every((result) => result.status === "rejected")) {
+    throw new Error("OpenAlex 与 Europe PMC 暂时均无法连接，请稍后重试");
+  }
+  return { papers: deduplicateLivePapers(papers), sourceStatus, requestedQuery };
 }
 
 async function translateBrowserText(text: string) {
@@ -428,6 +549,7 @@ export default function Home() {
   const [product, setProduct] = useState("全部产物");
   const [language, setLanguage] = useState("中英双语");
   const [livePapers, setLivePapers] = useState<Paper[]>([]);
+  const [lastLiveQuery, setLastLiveQuery] = useState("");
   const [importedPapers, setImportedPapers] = useState<Paper[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState("开放数据库实时检索尚未启动");
@@ -461,32 +583,35 @@ export default function Home() {
     const q = query.trim().toLowerCase();
     return allPapers.filter((paper) => {
       const searchable = [paper.title, paper.titleZh, paper.authors, paper.chassis, paper.product, paper.route, paper.tags.join(" ")].join(" ").toLowerCase();
-      const matchesQuery = !q || q.split(/\s+/).every((token) => searchable.includes(token));
+      const isCurrentLiveResult = Boolean(paper.live && q && q === lastLiveQuery);
+      const matchesQuery = isCurrentLiveResult || !q || q.split(/\s+/).every((token) => searchable.includes(token));
       const matchesChassis = chassis === "全部底盘" || paper.chassis === chassis;
       const matchesProduct = product === "全部产物" || paper.product === product;
       const matchesLanguage = language === "中英双语" || paper.language === language;
       return matchesQuery && matchesChassis && matchesProduct && matchesLanguage;
     });
-  }, [query, chassis, product, language, allPapers]);
+  }, [query, chassis, product, language, allPapers, lastLiveQuery]);
 
   const scrollToExplore = () => document.getElementById("literature")?.scrollIntoView({ behavior: "smooth" });
 
   const runLiveSearch = async () => {
     setIsSyncing(true);
-    setSyncMessage("正在同步 OpenAlex 与 Crossref…");
+    setSyncMessage("正在同步 OpenAlex 与 Europe PMC…");
     try {
+      const requestedQuery = normalizeResearchQuery(query);
       const isGitHubPages = window.location.hostname.endsWith("github.io");
       const data = isGitHubPages
-        ? { papers: await searchOpenAlexInBrowser(query), sourceStatus: [{ name: "OpenAlex", status: "ok" }] }
-        : await fetch(`/api/literature?q=${encodeURIComponent(query)}`).then(async (response) => {
+        ? await searchLiteratureInBrowser(query)
+        : await fetch(`/api/literature?q=${encodeURIComponent(requestedQuery)}`).then(async (response) => {
             if (!response.ok) throw new Error("检索服务暂不可用");
             return response.json() as Promise<{ papers?: Paper[]; sourceStatus?: Array<{ name: string; status: string }>; updatedAt?: string }>;
           });
       const next = data.papers ?? [];
       setLivePapers(next);
+      setLastLiveQuery(query.trim().toLowerCase());
       const activeSources = (data.sourceStatus ?? []).filter((item) => item.status === "ok").map((item) => item.name).join(" + ");
       setSyncMessage(activeSources
-        ? `已从 ${activeSources} 获取并去重 ${next.length} 条结果`
+        ? `已按“${requestedQuery}”从 ${activeSources} 获取并去重 ${next.length} 条结果`
         : "开放数据源暂未响应，已保留内置核验文献");
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : "实时检索失败，请稍后重试");
