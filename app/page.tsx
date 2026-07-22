@@ -548,6 +548,7 @@ export default function Home() {
   const [chassis, setChassis] = useState("全部底盘");
   const [product, setProduct] = useState("全部产物");
   const [language, setLanguage] = useState("中英双语");
+  const [sortOrder, setSortOrder] = useState("best");
   const [livePapers, setLivePapers] = useState<Paper[]>([]);
   const [lastLiveQuery, setLastLiveQuery] = useState("");
   const [importedPapers, setImportedPapers] = useState<Paper[]>([]);
@@ -591,6 +592,30 @@ export default function Home() {
       return matchesQuery && matchesChassis && matchesProduct && matchesLanguage;
     });
   }, [query, chassis, product, language, allPapers, lastLiveQuery]);
+
+  const sortedPapers = useMemo(() => {
+    if (sortOrder === "best") return filteredPapers;
+    const next = [...filteredPapers];
+    const collator = new Intl.Collator(["zh-CN", "en"], { sensitivity: "base", numeric: true });
+    const firstAuthor = (paper: Paper) => paper.authors.split(/[,;]/)[0]?.trim() || "未知作者";
+
+    next.sort((a, b) => {
+      if (sortOrder === "date-desc") return (b.year || -1) - (a.year || -1);
+      if (sortOrder === "date-asc") {
+        const yearA = a.year || Number.MAX_SAFE_INTEGER;
+        const yearB = b.year || Number.MAX_SAFE_INTEGER;
+        return yearA - yearB;
+      }
+      if (sortOrder === "author") {
+        return collator.compare(firstAuthor(a), firstAuthor(b)) || (b.year || 0) - (a.year || 0);
+      }
+      if (sortOrder === "journal") {
+        return collator.compare(a.journal || "未知期刊", b.journal || "未知期刊") || (b.year || 0) - (a.year || 0);
+      }
+      return 0;
+    });
+    return next;
+  }, [filteredPapers, sortOrder]);
 
   const scrollToExplore = () => document.getElementById("literature")?.scrollIntoView({ behavior: "smooth" });
 
@@ -735,6 +760,13 @@ export default function Home() {
             <option value="ZH">中文</option>
             <option value="EN">英文</option>
           </select>
+          <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value)} aria-label="文献排序">
+            <option value="best">排序：最佳匹配</option>
+            <option value="date-desc">发表日期：新 → 旧</option>
+            <option value="date-asc">发表日期：旧 → 新</option>
+            <option value="author">第一作者：A → Z</option>
+            <option value="journal">期刊：A → Z</option>
+          </select>
           <button className="sync-button" onClick={runLiveSearch} disabled={isSyncing}>{isSyncing ? "同步中…" : "联网检索"}<span>↻</span></button>
         </div>
         <div className="search-meta">
@@ -742,7 +774,7 @@ export default function Home() {
           <div className="search-actions">
             <input ref={fileInputRef} type="file" accept=".ris,.nbib,.csv,.txt" onChange={(event) => handleImport(event.target.files?.[0])} />
             <button onClick={() => fileInputRef.current?.click()}>导入 CNKI / 万方 / 维普导出文件</button>
-            <button onClick={() => { setQuery(""); setChassis("全部底盘"); setProduct("全部产物"); setLanguage("中英双语"); }}>清除筛选</button>
+            <button onClick={() => { setQuery(""); setChassis("全部底盘"); setProduct("全部产物"); setLanguage("中英双语"); setSortOrder("best"); }}>清除筛选</button>
           </div>
         </div>
       </section>
@@ -753,7 +785,7 @@ export default function Home() {
           <span>原始题名 · 中文译题 · 中文导读 · 原文链接</span>
         </div>
         <div className="paper-grid">
-          {filteredPapers.map((paper, index) => (
+          {sortedPapers.map((paper, index) => (
             <article className="paper-card" key={paper.id}>
               <div className="paper-topline">
                 <span className="index">{String(index + 1).padStart(2, "0")}</span>
